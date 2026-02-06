@@ -104,6 +104,6 @@ output application/json
 
     <os:object-store name="Inventory_Cache" doc:name="Inventory Cache"
                      persistent="false" maxEntries="10000"
-                     entryTtl="4" entryTtlUnit="HOURS"/>
+                     entryTtl="30" entryTtlUnit="MINUTES"/>
 
 </mule>
