@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd">
+
+    <!-- Inventory sync from NetSuite - runs every 4 hours -->
+    <!-- KNOWN ISSUE: Cache TTL too aggressive, stale data reported (INTG-7) -->
+    <flow name="inventory-sync-scheduler-flow" doc:name="Inventory Sync Scheduler">
+        <scheduler doc:name="Run Every 4 Hours">
+            <scheduling-strategy>
+                <fixed-frequency frequency="4" timeUnit="HOURS"/>
+            </scheduling-strategy>
+        </scheduler>
+
+        <logger level="INFO" message="Starting inventory sync from NetSuite..." doc:name="Log Start"/>
+
+        <http:request method="GET" config-ref="NetSuite_Request_Config" path="/api/inventory/all" doc:name="Fetch NetSuite Inventory"/>
+
+        <ee:transform doc:name="Transform Inventory Data">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+(payload.items default []) map ((item) -> {
+    materialNo: item.internalId,
+    sku: item.itemId,
+    name: item.displayName,
+    quantityOnHand: item.quantityOnHand default 0,
+    quantityAvailable: item.quantityAvailable default 0,
+    quantityOnOrder: item.quantityOnOrder default 0,
+    warehouseLocation: item.location.name default "Unknown",
+    lastUpdated: now() as String {format: "yyyy-MM-dd'T'HH:mm:ss'Z'"}
+})]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+
+        <!-- Cache inventory data in Object Store -->
+        <!-- TODO: Reduce TTL from 4 hours to 30 minutes (INTG-7) -->
+        <foreach doc:name="Cache Each Item">
+            <os:store key="#[payload.materialNo]" objectStore="Inventory_Cache" doc:name="Cache Item">
+                <os:value><![CDATA[#[output application/json --- payload]]]></os:value>
+            </os:store>
+        </foreach>
+
+        <logger level="INFO" message="#['Inventory sync complete. Items cached: ' ++ sizeOf(payload)]" doc:name="Log Complete"/>
+
+        <error-handler>
+            <on-error-continue type="ANY">
+                <logger level="ERROR" message="#['Inventory sync FAILED: ' ++ error.description]" doc:name="Log Error"/>
+                <!-- TODO: Send Slack alert on failure (INTG-8) -->
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <!-- Real-time inventory check endpoint -->
+    <flow name="check-inventory-flow" doc:name="Check Inventory">
+        <http:listener config-ref="HTTP_Listener_Config" path="/api/inventory/{materialNo}" method="GET" doc:name="GET /inventory/{materialNo}"/>
+
+        <set-variable variableName="materialNo" value="#[attributes.uriParams.materialNo]" doc:name="Set Material No"/>
+
+        <try doc:name="Try Cache First">
+            <os:retrieve key="#[vars.materialNo]" objectStore="Inventory_Cache" doc:name="Get From Cache"/>
+            <ee:transform doc:name="Parse Cached Data">
+                <ee:message>
+                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+payload ++ { source: "cache" }]]></ee:set-payload>
+                </ee:message>
+            </ee:transform>
+            <error-handler>
+                <on-error-continue type="OS:KEY_NOT_FOUND">
+                    <!-- Cache miss - call NetSuite directly -->
+                    <http:request method="GET" config-ref="NetSuite_Request_Config"
+                                  path="#['/api/inventory/' ++ vars.materialNo]" doc:name="Fetch from NetSuite"/>
+                    <ee:transform doc:name="Transform Direct Response">
+                        <ee:message>
+                            <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    materialNo: payload.internalId,
+    sku: payload.itemId,
+    name: payload.displayName,
+    quantityOnHand: payload.quantityOnHand default 0,
+    quantityAvailable: payload.quantityAvailable default 0,
+    source: "live",
+    lastUpdated: now() as String {format: "yyyy-MM-dd'T'HH:mm:ss'Z'"}
+}]]></ee:set-payload>
+                        </ee:message>
+                    </ee:transform>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </flow>
+
+    <os:object-store name="Inventory_Cache" doc:name="Inventory Cache"
+                     persistent="false" maxEntries="10000"
+                     entryTtl="4" entryTtlUnit="HOURS"/>
+
+</mule>

@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd">
+
+    <!-- GET /api/customers - List all customers -->
+    <flow name="get-customers-flow" doc:name="Get Customers">
+        <http:listener config-ref="HTTP_Listener_Config" path="/api/customers" method="GET" doc:name="GET /customers"/>
+
+        <db:select config-ref="Database_Config" doc:name="Select Customers">
+            <db:sql><![CDATA[SELECT customer_id, first_name, last_name, email, company, status, created_at
+                             FROM customers
+                             WHERE status = 'active'
+                             ORDER BY last_name ASC
+                             LIMIT :limit OFFSET :offset]]></db:sql>
+            <db:input-parameters><![CDATA[#[{
+                limit: attributes.queryParams.limit default 50,
+                offset: attributes.queryParams.offset default 0
+            }]]]></db:input-parameters>
+        </db:select>
+
+        <ee:transform doc:name="Transform Response">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    count: sizeOf(payload),
+    customers: payload map ((customer) -> {
+        id: customer.customer_id,
+        firstName: customer.first_name,
+        lastName: customer.last_name,
+        email: customer.email,
+        company: customer.company,
+        status: customer.status,
+        createdAt: customer.created_at
+    })
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- GET /api/customers/{id} - Get customer by ID -->
+    <flow name="get-customer-by-id-flow" doc:name="Get Customer By ID">
+        <http:listener config-ref="HTTP_Listener_Config" path="/api/customers/{customerId}" method="GET" doc:name="GET /customers/{id}"/>
+
+        <set-variable variableName="customerId" value="#[attributes.uriParams.customerId]" doc:name="Set Customer ID"/>
+
+        <db:select config-ref="Database_Config" doc:name="Select Customer">
+            <db:sql><![CDATA[SELECT c.*, a.street, a.city, a.state, a.zip_code, a.country
+                             FROM customers c
+                             LEFT JOIN addresses a ON c.customer_id = a.customer_id
+                             WHERE c.customer_id = :customerId]]></db:sql>
+            <db:input-parameters><![CDATA[#[{ customerId: vars.customerId }]]]></db:input-parameters>
+        </db:select>
+
+        <choice doc:name="Customer Found?">
+            <when expression="#[sizeOf(payload) > 0]">
+                <ee:transform doc:name="Transform Customer">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var cust = payload[0]
+---
+{
+    id: cust.customer_id,
+    firstName: cust.first_name,
+    lastName: cust.last_name,
+    email: cust.email,
+    company: cust.company,
+    status: cust.status,
+    address: {
+        street: cust.street,
+        city: cust.city,
+        state: cust.state,
+        zipCode: cust.zip_code,
+        country: cust.country
+    }
+}]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </when>
+            <otherwise>
+                <set-payload value='#[output application/json --- { error: "Customer not found", customerId: vars.customerId }]'/>
+                <set-variable variableName="httpStatus" value="404"/>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- POST /api/customers - Create new customer -->
+    <!-- TODO: Add input validation - see INTG-4 -->
+    <!-- BUG: Null pointer when address is missing - INTG-4 -->
+    <flow name="create-customer-flow" doc:name="Create Customer">
+        <http:listener config-ref="HTTP_Listener_Config" path="/api/customers" method="POST" doc:name="POST /customers"/>
+
+        <ee:transform doc:name="Prepare Insert">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+{
+    firstName: payload.firstName,
+    lastName: payload.lastName,
+    email: payload.email,
+    company: payload.company,
+    street: payload.address.street,
+    city: payload.address.city,
+    state: payload.address.state,
+    zipCode: payload.address.zipCode,
+    country: payload.address.country default "US"
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+
+        <db:insert config-ref="Database_Config" doc:name="Insert Customer">
+            <db:sql><![CDATA[INSERT INTO customers (first_name, last_name, email, company, status)
+                             VALUES (:firstName, :lastName, :email, :company, 'active')]]></db:sql>
+            <db:input-parameters><![CDATA[#[payload]]]></db:input-parameters>
+        </db:insert>
+
+        <logger level="INFO" message="#['Customer created: ' ++ payload.firstName ++ ' ' ++ payload.lastName]" doc:name="Log Creation"/>
+    </flow>
+
+</mule>

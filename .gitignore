@@ -1,0 +1,27 @@
+# Mule
+target/
+.mule/
+.studio/
+*.class
+
+# Maven
+.mvn/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Sensitive
+config-prod.properties
+secure-*.properties
